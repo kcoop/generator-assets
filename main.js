@@ -1002,11 +1002,15 @@
 
     // Start a new update
     function startLayerUpdate(changeContext) {
-        var layerUpdatedDeferred = Q.defer();
+        // The image could have been closed in the meantime
+        var documentContext = _contextPerDocument[changeContext.document.id];
+        if (!documentContext) {
+            return resolvedPromise();
+        }
 
-        var documentContext = _contextPerDocument[changeContext.document.id],
-            layerContext    = documentContext.layers ? documentContext.layers[changeContext.layer.id] : {},
-            layer           = changeContext.layer;
+        var layerUpdatedDeferred = Q.defer(),
+            layerContext         = documentContext.layers ? documentContext.layers[changeContext.layer.id] : {},
+            layer                = changeContext.layer;
 
         console.log("Updating layer " + changeContext.layer.id +
             " (" + stringify(changeContext.layer.name || layerContext.name) +
