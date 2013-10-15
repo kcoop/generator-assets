@@ -1,5 +1,5 @@
 {
-  "name": "generator-assets",
+  "name": "generator-assets-android-ios",
   "version": "1.0.0",
   "dependencies": {
     "mkdirp": {

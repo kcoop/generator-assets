@@ -45,7 +45,7 @@
         validation = require("./lib/validation");
 
     var PLUGIN_ID = require("./package.json").name,
-        MENU_ID = "assets-android",
+        MENU_ID = "assets-android-ios",
         // Note to third-party plugin developers: This string format ("$$$...") is used for
         // localization of strings that are built in to Photoshop. Third-party plugins should
         // use a regular string (or use their own approach to localization) for menu labels.
@@ -55,7 +55,7 @@
         // Note to Photoshop engineers: This zstring must be kept in sync with the zstring in
         // generate.jsx in the Photoshop repo.
         // MENU_LABEL = "$$$/JavaScripts/Generator/ImageAssets/Menu=Image Assets",
-        MENU_LABEL = "Image Assets (with Android dp support)",
+        MENU_LABEL = "Image Assets (iOS & Android)",
         // Files that are ignored when trying to determine whether a directory is empty
         FILES_TO_IGNORE = [".ds_store", "desktop.ini"],
         DELAY_TO_WAIT_UNTIL_USER_DONE = 300,
@@ -177,6 +177,37 @@
                 console.error("Error while deleting %j: %s", path, e.stack);
             }
         });
+
+        getDirectoriesRelatedToLayer(documentId, layerId).forEach(function (relativePath) {
+           var path = resolve(documentContext.assetGenerationDir, relativePath);
+            try {
+                if (fs.existsSync(path)) {
+                    console.log("Deleting directory %j", path);
+                    fs.rmdirSync(path);
+                } else {
+                    console.log("Not deleting directory %j - it does not exist", path);
+                }
+            } catch (e) {
+                console.error("Error while deleting directory %j: %s", path, e.stack);
+            }
+        });
+    }
+
+    function getDirectoriesRelatedToLayer(documentId, layerId) {
+        var documentContext = _contextPerDocument[documentId];
+        if (!documentContext) { return; }
+
+        var layerContext = documentContext.layers && documentContext.layers[layerId];
+        if (!layerContext) { return; }
+
+        var components = layerContext.validFileComponents || [];
+        var directories = [];
+        components.forEach(function(component) {
+            if (component.generatedDirectory !== 'undefined' && directories.indexOf(component.generatedDirectory) == -1) {
+                directories.push(component.generatedDirectory);
+            }
+        });
+        return directories;
     }
 
     function getFilesRelatedToLayer(documentId, layerId) {
@@ -256,7 +287,7 @@
     }
     
     function analyzeComponent(component, reportError) {
-        var supportedUnits      = ["in", "cm", "px", "mm", "dp"];
+        var supportedUnits      = ["in", "cm", "px", "mm", "dp", "is"];
         var supportedExtensions = ["jpg", "jpeg", "png", "gif"];
 
         if (_config && _config["svg-enabled"]) {
@@ -364,10 +395,60 @@
             }
         });
 
-        console.log("!!!!android comps:", pxComps);
         return pxComps;
     }
-    
+
+    var iosDensities = [
+        {suffix: "", scale: 1, idiom: "universal", iosScale: "1x" },
+        {suffix: "@2x", scale: 2.0, idiom: "universal", iosScale: "2x" },
+        {suffix: "@2x", scale: 2.0, idiom: "ipad", iosScale: "1x" },
+        {suffix: "@2x~ipad", scale: 4.0, idiom: "ipad", iosScale: "2x" }
+    ];
+
+    function insertIOSComponents(components) {
+        var densities = iosDensities;
+        var pxComps = [];
+        components.forEach(function (component) {
+            if (component.heightUnit === "is" || component.widthUnit === "is") {
+                var baseFilename = component.file.split('.')[0];
+                var imageSetDirPath = baseFilename + ".imageset";
+                var jsonImageReferences = [];
+                densities.forEach(function (density) {
+                    var c = JSON.parse(JSON.stringify(component));
+                    c.name = c.name + density.suffix;
+                    c.height = c.height * density.scale;
+                    c.width = c.width * density.scale;
+                    c.heightUnit = c.widthUnit = "px";
+                    var filename = baseFilename + density.suffix + "." + c.extension;
+                    c.file = pathJoin(imageSetDirPath, filename);
+                    c.generatedDirectory = imageSetDirPath;
+                    pxComps.push(c);
+                    jsonImageReferences.push({
+                        idiom: density.idiom,
+                        scale: density.iosScale,
+                        filename: filename
+                    });
+                });
+                pxComps.push({
+                    name: component.name + ".JSON",
+                    file: pathJoin(imageSetDirPath, "Contents.json"),
+                    generatedDirectory: imageSetDirPath,
+                    json: {
+                        images: jsonImageReferences,
+                        info: {
+                            version: 1,
+                            author: "Photoshop Generator iOS"
+                        }
+                    }
+                });
+            } else {
+                pxComps.push(component);
+            }
+        });
+
+        return pxComps;
+    }
+
     function analyzeLayerName(layerName) {
         var components = parseLayerName(layerName),
             errors = [];
@@ -390,6 +471,7 @@
             return !hadErrors;
         });
         validFileComponents = insertAndroidComponents(validFileComponents);
+        validFileComponents = insertIOSComponents(validFileComponents);
 
         return {
             errors: errors,
@@ -1193,8 +1275,34 @@
             );
         }
 
+        function createLayerJSONFiles() {
+            var components = layerContext.validFileComponents.filter(function(component) {
+                return typeof component.json !== "undefined";
+            });
+
+            components.forEach(function(component) {
+                var path = resolve(documentContext.assetGenerationDir, component.file);
+
+                console.log("Generating", path);
+
+                var dirname = require("path").dirname;
+                var directory = dirname(path);
+                if (!fs.existsSync(directory)) {
+                    mkdirp.sync(directory);
+                }
+
+                fs.writeFile(path, JSON.stringify(component.json, undefined, 2), function (err) {
+                    if (err) {
+                        console.log("Could not write file " + path + ": " + err);
+                    }
+                });
+            });
+        }
+
         function createLayerImages() {
-            var components = layerContext.validFileComponents;
+            var components = layerContext.validFileComponents.filter(function(component) {
+                return typeof component.json === "undefined";
+            });
 
             // Get exact bounds
             _generator.getPixmap(changeContext.document.id, changeContext.layer.id, { boundsOnly: true }).then(
@@ -1297,6 +1405,7 @@
             // have been dragged & dropped or copied & pasted,
             // and therefore might not be empty like new layers
             createLayerImages();
+            createLayerJSONFiles();
         }
 
         return layerUpdatedDeferred.promise;
@@ -1346,7 +1455,7 @@
         _generator = generator;
         _config = config;
 
-        console.log("initializing generator-assets plugin with config %j", _config);
+        console.log("initializing generator-assets-android-ios plugin with config %j", _config);
 
         // TODO: Much of this initialization is currently temporary. Once
         // we have storage of assets in the correct location implemented, we
