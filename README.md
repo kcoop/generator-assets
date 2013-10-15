@@ -20,7 +20,7 @@ Turn on generation in Photoshop by going to File->Generate->Image Assets (iOS & 
 If you change the name of a layer or layer group to something like `20x20dp ic_ab_search.png`, you'll get:
 ![screenshot](https://raw.github.com/kcoop/generator-assets/master/generated_dirs_screenshot.png)
 
-And if you change the name of a layer or layer group to something like '20x20is test.png', you'll get:
+And if you change the name of a layer or layer group to something like `20x20is test.png`, you'll get:
 ![screenshot](https://raw.github.com/kcoop/generator-assets/master/generated_ios_dirs_screenshot.png)
 
 and the iOS Contents.json file will look like this, so you'll have generated files for iPhone, iPhone retina, iPad, and iPad retina.
