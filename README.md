@@ -1,4 +1,4 @@
-## Image Asset Generation Plug-in for Generator (with Android dp support)
+## Image Asset Generation Plug-in for Generator (with iOS Image Sets and Android dp support)
 
 This fork adds support for:
  - the Android "dp" unit, i.e. it creates images for different screen densities in the corresponding "drawable-" directories.
