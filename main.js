@@ -399,8 +399,8 @@
     }
 
     var iosDensities = [
-        {suffix: "", scale: 1, idiom: "universal", iosScale: "1x" },
-        {suffix: "@2x", scale: 2.0, idiom: "universal", iosScale: "2x" },
+        {suffix: "", scale: 1, idiom: "iphone", iosScale: "1x" },
+        {suffix: "@2x", scale: 2.0, idiom: "iphone", iosScale: "2x" },
         {suffix: "@2x", scale: 2.0, idiom: "ipad", iosScale: "1x" },
         {suffix: "@2x~ipad", scale: 4.0, idiom: "ipad", iosScale: "2x" }
     ];

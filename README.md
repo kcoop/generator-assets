@@ -28,12 +28,12 @@ and the iOS Contents.json file will look like this, so you'll have generated fil
 {
   "images": [
     {
-      "idiom": "universal",
+      "idiom": "iphone",
       "scale": "1x",
       "fileName": "test.png"
     },
     {
-      "idiom": "universal",
+      "idiom": "iphone",
       "scale": "2x",
       "fileName": "test@2x.png"
     },
