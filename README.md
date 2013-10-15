@@ -8,7 +8,7 @@ This fork adds support for:
 Choose one of the following methods to get it working:
 
 - Deploy into Photoshop:
-  - Download the [zip file](https://github.com/kcoop/generator-assets/releases/tag/android-1.0.1)
+  - Download the [zip file](https://github.com/kcoop/generator-assets/releases/tag/android-ios-1.0)
   - Extract it into `/Applications/Adobe Photoshop CC/Plug-ins/Generator/` (Mac), or `Program Files/Adobe Photoshop CC/Plugin-ins/Generator...` on Windows.
     - the resulting directory is `/Applications/Adobe Photoshop CC/Plug-ins/Generator/generator-assets-android-ios`
   - Re-launch Photoshop
