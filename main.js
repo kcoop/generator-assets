@@ -60,8 +60,7 @@
         FILES_TO_IGNORE = [".ds_store", "desktop.ini"],
         DELAY_TO_WAIT_UNTIL_USER_DONE = 300,
         MAX_SIMULTANEOUS_UPDATES = 50,
-        MAX_DIR_RENAME_ATTEMPTS = 1000,
-        TIMEOUT_ERROR_MESSAGE = "timeout"; // must be in sync with Generator's timeout error
+        MAX_DIR_RENAME_ATTEMPTS = 1000;
 
     // TODO: Once we get the layer change management/updating right, we should add a
     // big comment at the top of this file explaining how this all works. In particular
@@ -450,7 +449,7 @@
     }
 
     function analyzeLayerName(layerName) {
-        var components = parseLayerName(layerName),
+        var components = typeof(layerName) === "string" ? parseLayerName(layerName) : [],
             errors = [];
 
         var validFileComponents = components.filter(function (component) {
@@ -735,11 +734,6 @@
             },
             function (err) {
                 console.error("[Assets] Error in getDocumentInfo:", err);
-                if (err instanceof Error && err.message === TIMEOUT_ERROR_MESSAGE) {
-                    process.nextTick(function () {
-                        requestEntireDocument(documentId);
-                    });
-                }
             }
         ).done();
     }
@@ -987,7 +981,9 @@
             // Turn asset generation off
             context.assetGenerationEnabled = false;
             updateMenuState();
-            updateDocumentState();
+            // We do not need to update the document state because generator metadata
+            // is cleared on saveas, so our assetGenerationEnabled = false is implicitly
+            // in the metadata already.
         }
         
         // Return a resolved promise
@@ -1018,12 +1014,14 @@
                 updateIsScheduled:      false,
                 updateIsObsolete:       false,
                 updateDelayTimeout:     null,
+                documentChanges:        [],
+                layerChanges:           [],
                 updateCompleteDeferred: Q.defer()
             };
         }
 
-        context.document = document;
-        context.layer = layer;
+        context.documentChanges.push(document);
+        context.layerChanges.push(layer);
 
         // Regardless of the nature of the change, we want to make sure that
         // all changes to a layer are processed in sequence
@@ -1107,19 +1105,8 @@
 
     // Start a new update
     function startLayerUpdate(changeContext) {
-        var layerUpdatedDeferred = Q.defer();
-
-        var documentContext = _contextPerDocument[changeContext.document.id],
-            layerContext    = documentContext.layers ? documentContext.layers[changeContext.layer.id] : {},
-            layer           = changeContext.layer;
-
-        console.log("Updating layer " + changeContext.layer.id +
-            " (" + stringify(changeContext.layer.name || layerContext.name) +
-                ") of document " + changeContext.document.id
-        );
-
         function deleteLayerImages() {
-            deleteFilesRelatedToLayer(changeContext.document.id, changeContext.layer.id);
+            deleteFilesRelatedToLayer(document.id, layer.id);
         }
 
         function updateLayerName() {
@@ -1160,10 +1147,7 @@
             }
         }
 
-        // TODO: Make sure this function is refactored so that it doesn't have so much
-        // callback nesting. This function will change substantially when we move image
-        // creation to core, so avoiding the refactor right now.
-        function createLayerImage(pixmap, fileName, settings) {
+        function createLayerImage(data, fileName, settings) {
             var imageCreatedDeferred = Q.defer(),
                 path = resolve(documentContext.assetGenerationDir, fileName),
                 tmpPath;
@@ -1175,7 +1159,21 @@
                 .then(function (path) {
                     // Save the image in a temporary file
                     tmpPath = path;
-                    return _generator.savePixmap(pixmap, tmpPath, settings);
+                    if (settings.format === "svg") {
+                        var svgDeferred = Q.defer();
+                        fs.writeFile(tmpPath, data, function (err) {
+                            if (err) {
+                                svgDeferred.reject("Error writing svgFile " + tmpPath);
+                            }
+                            else {
+                                svgDeferred.resolve(tmpPath);
+                            }
+                        });
+                        return svgDeferred.promise;
+                    }
+                    else {
+                        return _generator.savePixmap(data, tmpPath, settings);
+                    }
                 })
                 .then(function () {
                     // Create the target directory
@@ -1211,63 +1209,72 @@
         function createComponentImage(component, exactBounds) {
             // SVGs use a different code path from the pixel-based formats
             if (component.extension === "svg") {
-                var fileSavedDeferred = Q.defer();
-
-                console.log("Creating SVG for layer " + changeContext.layer.id + " (" + component.name + ")");
-                _generator.saveLayerToSVGFile(changeContext.layer.id, component.scale || 1, component.file);
-
-                // TODO: Make sure this is called when the file operation is actually done...
-                fileSavedDeferred.resolve();
-                
-                return fileSavedDeferred.promise;
+                console.log("Creating SVG for layer " + layer.id + " (" + component.name + ")");
+                var svgPromise = _generator.getSVG(layer.id, component.scale || 1);
+                return svgPromise.then(
+                    function (svgJSON) {
+                        console.log("Received SVG text:\n" + decodeURI(svgJSON.svgText));
+                        return createLayerImage(decodeURI(svgJSON.svgText),
+                                                component.file,
+                                                {format:  component.extension});
+                    },
+                    function (err) {
+                        console.log("SVG creation bombed: " + err + "\n");
+                    }
+                );
             }
 
-            var targetWidth    = convertToPixels(component.width,  component.widthUnit),
-                targetHeight   = convertToPixels(component.height, component.heightUnit),
-                targetScale    = component.scale,
-                scaleSettings  = {
-                    width:  targetWidth  ? Math.max(1, Math.ceil(targetWidth))  : null,
-                    height: targetHeight ? Math.max(1, Math.ceil(targetHeight)) : null,
-                    scale:  targetScale
+            // Code path for pixel-based output (SVG output will cause an early return)
+            var scaleSettings = {
+                    width:  convertToPixels(component.width,  component.widthUnit),
+                    height: convertToPixels(component.height, component.heightUnit),
+                    scaleX: component.scaleX || component.scale,
+                    scaleY: component.scaleY || component.scale,
+                    // Backwards compatibility
+                    scale:  component.scale
                 },
-                deepBounds     = _generator.getDeepBounds(layerContext),
-                pixmapSettings = _generator.getPixmapParams(scaleSettings, deepBounds, exactBounds),
-                expectedWidth  = pixmapSettings.expectedWidth,
-                expectedHeight = pixmapSettings.expectedHeight;
+                
+                // Mask
+                maskBounds = layerContext.mask && layerContext.mask.bounds,
+                
+                // Static: User provided
+                staticBounds  = _generator.getDeepBounds(layerContext),
+                // Visible: User provided + effects
+                visibleBounds = exactBounds,
+                // Padded: User provided + effects + padding through layer mask
+                paddedBounds  = !maskBounds ? exactBounds : {
+                    left:   Math.min(exactBounds.left,   maskBounds.left),
+                    top:    Math.min(exactBounds.top,    maskBounds.top),
+                    right:  Math.max(exactBounds.right,  maskBounds.right),
+                    bottom: Math.max(exactBounds.bottom, maskBounds.bottom)
+                },
 
-            delete pixmapSettings.expectedWidth;
-            delete pixmapSettings.expectedHeight;
-    
+                pixmapSettings = _generator.getPixmapParams(scaleSettings, staticBounds, visibleBounds, paddedBounds);
+
             // Get the pixmap
             console.log("Requesting pixmap for layer %d (%s) in document %d with settings %j",
-                changeContext.layer.id, layerContext.name || changeContext.layer.name,
-                changeContext.document.id, pixmapSettings);
-            return _generator.getPixmap(changeContext.document.id, changeContext.layer.id, pixmapSettings).then(
+                layer.id, layerContext.name || layer.name,
+                document.id, pixmapSettings);
+            return _generator.getPixmap(document.id, layer.id, pixmapSettings).then(
                 function (pixmap) {
-                    var sourceWidth  = exactBounds.right - exactBounds.left,
-                        sourceHeight = exactBounds.bottom - exactBounds.top;
-                    
-                    if (pixmap.width  !== expectedWidth ||
-                        pixmap.height !== expectedHeight) {
-                        console.warn("Image size is " + sourceWidth + "x" + sourceHeight +
-                            ", expected to get " + expectedWidth + "x" +
-                            expectedHeight + ", got " + pixmap.width + "x" + pixmap.height +
-                            ", setting were %j", pixmapSettings);
+                    var padding;
+                    if (pixmapSettings.getPadding) {
+                        padding = pixmapSettings.getPadding(pixmap.width, pixmap.height);
                     }
-
                     return createLayerImage(pixmap, component.file, {
                         quality: component.quality,
                         format:  component.extension,
-                        ppi:     documentContext.ppi
+                        ppi:     documentContext.ppi,
+                        padding: padding
                     });
                 },
                 function (err) {
-                    var layerName = layerContext.name || changeContext.layer.name;
+                    var layerName = layerContext.name || layer.name;
                     console.error("[Assets] Error when getting the pixmap for layer %d (%s) in document %d: %j",
-                        changeContext.layer.id, layerName, changeContext.document.id, err);
+                        layer.id, layerName, document.id, err);
                     reportErrorsToUser(documentContext, [
-                        "Failed to get pixmap of layer " + changeContext.layer.id +
-                        " (" + (changeContext.layer.name || layerContext.name) + "): " + err
+                        "Failed to get pixmap of layer " + layer.id +
+                        " (" + (layer.name || layerContext.name) + "): " + err
                     ]);
 
                     layerUpdatedDeferred.reject(err);
@@ -1299,13 +1306,101 @@
             });
         }
 
+        function updateSubLayer(subLayer) {
+            var subLayerContext = documentContext.layers[subLayer.id];
+            if (subLayerContext.parentLayerId !== layer.id) {
+                subLayerContext.parentLayerId = layer.id;
+                console.log("Layer %j (%j) is now in layer %j (%j)", subLayer.id,
+                    subLayer.name || subLayerContext.name, layer.id, layer.name || layerContext.name);
+            }
+        }
+
+        var layerUpdatedDeferred = Q.defer(),
+            document,
+            documentContext,
+            documentChanges,
+            layer,
+            layerContext,
+            layerChanges,
+            assetsUpdateNeeded;
+
+        // Make sure that we only process the changes accumulated until this point
+        documentChanges = changeContext.documentChanges;
+        layerChanges    = changeContext.layerChanges;
+        changeContext.documentChanges = [];
+        changeContext.layerChanges    = [];
+
+        while (documentChanges.length) {
+            document        = documentChanges.shift();
+            documentContext = _contextPerDocument[document.id];
+            
+            layer           = layerChanges.shift();
+            layerContext    = documentContext.layers ? documentContext.layers[layer.id] : {};
+
+            console.log("Updating layer " + layer.id + " (" + stringify(layer.name || layerContext.name) +
+                ") of document " + document.id, layer);
+
+            if (layer.type) {
+                layerContext.type = layer.type;
+            }
+
+            if (layer.removed) {
+                // If the layer was removed delete all generated files 
+                deleteLayerImages();
+            }
+            else if (layer.name) {
+                // If the layer name was changed, the generated files may get deleted
+                updateLayerName();
+            }
+
+            // Layer movement occured
+            // For more details, see processChangesToDocument
+            if (layer.index) {
+                // Child layers have been inserted or moved into this layer
+                if (layer.layers) {
+                    layer.layers.forEach(updateSubLayer);
+                }
+                // This layer doesn't have a parent (otherwise the event would have been for the parent)
+                else if (layer.atRootOfChange) {
+                    delete layerContext.parentLayerId;
+                }
+            }
+
+            if (layer.bounds) {
+                layerContext.bounds = layer.bounds;
+            }
+            if (layer.mask) {
+                if (layer.mask.removed) {
+                    delete layerContext.mask;
+                } else {
+                    layerContext.mask = layer.mask;
+                }
+            }
+
+            if (! (
+                // If the layer was removed, we're done since we delete the images above
+                layer.removed ||
+                // If there are no valid file components anymore, there's nothing to generate
+                !layerContext.validFileComponents || layerContext.validFileComponents.length === 0 ||
+                !documentContext.assetGenerationEnabled ||
+                !documentContext.assetGenerationDir
+            )) {
+                // Update the layer image
+                // The change could be layer.pixels, layer.added, layer.path, layer.name, ...
+                // Always update if it has been added because it could
+                // have been dragged & dropped or copied & pasted,
+                // and therefore might not be empty like new layers
+                assetsUpdateNeeded = true;
+            }
+        }
+
         function createLayerImages() {
             var components = layerContext.validFileComponents.filter(function(component) {
                 return typeof component.json === "undefined";
             });
 
             // Get exact bounds
-            _generator.getPixmap(changeContext.document.id, changeContext.layer.id, { boundsOnly: true }).then(
+            _generator.getPixmap(document.id, layer.id, { boundsOnly: true }).then(
                 function (pixmapInfo) {
                     var exactBounds = pixmapInfo.bounds;
                     if (exactBounds.right <= exactBounds.left || exactBounds.bottom <= exactBounds.top) {
@@ -1343,69 +1438,12 @@
             );
         }
 
-        if (layer.type) {
-            layerContext.type = layer.type;
-        }
-
-        if (layer.removed) {
-            // If the layer was removed delete all generated files 
-            deleteLayerImages();
-        }
-        else if (layer.name) {
-            // If the layer name was changed, the generated files may get deleted
-            updateLayerName();
-        }
-
-        // Layer movement occured
-        // For more details, see processChangesToDocument
-        if (layer.index) {
-            // Child layers have been inserted or moved into this layer
-            if (layer.layers) {
-                layer.layers.forEach(function (subLayer) {
-                    var subLayerContext = documentContext.layers[subLayer.id];
-                    if (subLayerContext.parentLayerId !== layer.id) {
-                        subLayerContext.parentLayerId = layer.id;
-                        console.log("Layer %j (%j) is now in layer %j (%j)", subLayer.id,
-                            subLayer.name || subLayerContext.name, layer.id, layer.name || layerContext.name);
-                    }
-                });
-            }
-            // This layer doesn't have a parent (otherwise the event would have been for the parent)
-            else if (layer.atRootOfChange) {
-                delete layerContext.parentLayerId;
-            }
-        }
-
-        if (layer.bounds) {
-            layerContext.bounds = layer.bounds;
-        }
-        if (layer.mask) {
-            if (layer.mask.removed) {
-                delete layerContext.mask;
-            } else {
-                layerContext.mask = layer.mask;
-            }
-        }
-
-        if (layer.removed || !layerContext.validFileComponents || layerContext.validFileComponents.length === 0) {
-            // If the layer was removed, we're done since we delete the images above
-            // If there are no valid file components anymore, there's nothing to generate
-            layerUpdatedDeferred.resolve();
-        }
-        else if (!documentContext.assetGenerationEnabled) {
-            layerUpdatedDeferred.resolve();
-        }
-        else if (!documentContext.assetGenerationDir) {
-            layerUpdatedDeferred.resolve();
-        }
-        else {
-            // Update the layer image
-            // The change could be layer.pixels, layer.added, layer.path, layer.name, ...
-            // Always update if it has been added because it could
-            // have been dragged & dropped or copied & pasted,
-            // and therefore might not be empty like new layers
+        if (assetsUpdateNeeded) {
+            // This will resolve the deferred
             createLayerImages();
             createLayerJSONFiles();
+        } else {
+            layerUpdatedDeferred.resolve();
         }
 
         return layerUpdatedDeferred.promise;
@@ -1417,6 +1455,8 @@
         // If the update is obsolete, schedule another one right after
         // This update will still be delayed to give Photoshop some time to catch its breath
         if (changeContext.updateIsObsolete) {
+            console.log("Update was marked as obsolete, starting over with %d pending changes",
+                changeContext.documentChanges.length);
             changeContext.updateIsObsolete = false;
             scheduleLayerUpdate(changeContext);
         }
